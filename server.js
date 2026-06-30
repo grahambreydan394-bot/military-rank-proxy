@@ -31,6 +31,8 @@ app.get('*', async (req, res) => {
         let allFilteredUsers = [];
         let nextCursor = '';
         let safetyCounter = 0; // prevent infinite loops
+        let totalScanned = 0;
+        const seenRankNames = new Set(); // debug: every role name we actually encountered
 
         // Roblox paginates 100 at a time, and since we're filtering out
         // most ranks, we need to walk through pages ourselves until
@@ -50,11 +52,16 @@ app.get('*', async (req, res) => {
 
             const data = response.data;
 
+            totalScanned += (data.data || []).length;
+            (data.data || []).forEach(member => seenRankNames.add(member.role?.name));
+
             const filtered = (data.data || []).filter(member =>
                 ALLOWED_RANKS.has(member.role?.name)
             );
 
             allFilteredUsers = allFilteredUsers.concat(filtered);
+
+            console.log(`Page ${safetyCounter + 1}: scanned ${data.data?.length || 0}, matched ${filtered.length}, nextPageCursor: ${data.nextPageCursor}`);
 
             nextCursor = data.nextPageCursor || '';
             safetyCounter++;
@@ -66,7 +73,13 @@ app.get('*', async (req, res) => {
         res.json({
             data: allFilteredUsers,
             nextPageCursor: null, // we've already walked all pages
-            previousPageCursor: null
+            previousPageCursor: null,
+            debug: {
+                pagesScanned: safetyCounter,
+                totalUsersScanned: totalScanned,
+                matchedCount: allFilteredUsers.length,
+                allRankNamesSeen: Array.from(seenRankNames)
+            }
         });
     } catch (error) {
         console.error(`Roblox API Error: ${error.message}`);
