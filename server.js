@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const GROUP_ID = 3029096;
 app.use(cors());
 
 // Only these ranks should be included in the output.
@@ -24,25 +25,46 @@ const ALLOWED_RANKS = new Set([
     'Supreme Marshal'
 ]);
 
+// One-time debug helper: hit /roles in your browser to see every role
+// in the group along with its exact name and numeric rank (0-255).
+// Use this to confirm ALLOWED_RANKS below matches Roblox's exact spelling,
+// and to find the lowest rank number you want to include.
+app.get('/roles', async (req, res) => {
+    try {
+        const response = await axios.get(
+            `https://groups.roblox.com/v1/groups/${GROUP_ID}/roles`,
+            { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }
+        );
+        res.json(response.data);
+    } catch (error) {
+        res.status(error.response?.status || 500).json({ error: error.message });
+    }
+});
+
+// Lowest numeric rank to include. Junior Lieutenant is the lowest rank
+// in your allowed list, so set this to its "rank" number from /roles.
+// Defaults to 0 (include everything) until you fill this in -- update
+// it once you've checked /roles, then matching becomes a pure safety net.
+const MIN_RANK = 0;
+
 // Universal catch-all route for incoming Google Sheet requests
 app.get('*', async (req, res) => {
     try {
-        let cursor = req.query.cursor || '';
         let allFilteredUsers = [];
         let nextCursor = '';
-        let safetyCounter = 0; // prevent infinite loops
+        let pageCount = 0;
         let totalScanned = 0;
-        const seenRankNames = new Set(); // debug: every role name we actually encountered
+        let stoppedEarly = false;
+        const seenRankNames = new Set(); // debug: every role name encountered
 
-        // Roblox paginates 100 at a time, and since we're filtering out
-        // most ranks, we need to walk through pages ourselves until
-        // we've either run out of pages or hit a reasonable cap.
+        // Scan HIGHEST ranks first (Desc), since the people we want are
+        // a small slice at the top of the rank ladder, not the bottom.
+        // Stop as soon as we see a rank below MIN_RANK -- everything
+        // after that point only gets lower, so there's no need to
+        // keep scanning through thousands of regular members.
         do {
-            const cursorParam = nextCursor || cursor
-                ? `&cursor=${encodeURIComponent(nextCursor || cursor)}`
-                : '';
-
-            const robloxUrl = `https://groups.roblox.com/v1/groups/3029096/users?sortOrder=Asc&limit=100${cursorParam}`;
+            const cursorParam = nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : '';
+            const robloxUrl = `https://groups.roblox.com/v1/groups/${GROUP_ID}/users?sortOrder=Desc&limit=100${cursorParam}`;
 
             console.log(`Forwarding request to Roblox: ${robloxUrl}`);
 
@@ -51,33 +73,37 @@ app.get('*', async (req, res) => {
             });
 
             const data = response.data;
+            const members = data.data || [];
+            totalScanned += members.length;
 
-            totalScanned += (data.data || []).length;
-            (data.data || []).forEach(member => seenRankNames.add(member.role?.name));
+            for (const member of members) {
+                seenRankNames.add(member.role?.name);
 
-            const filtered = (data.data || []).filter(member =>
-                ALLOWED_RANKS.has(member.role?.name)
-            );
+                if ((member.role?.rank ?? 0) < MIN_RANK) {
+                    stoppedEarly = true;
+                    break; // members only get lower-ranked from here on
+                }
 
-            allFilteredUsers = allFilteredUsers.concat(filtered);
+                if (ALLOWED_RANKS.has(member.role?.name)) {
+                    allFilteredUsers.push(member);
+                }
+            }
 
-            console.log(`Page ${safetyCounter + 1}: scanned ${data.data?.length || 0}, matched ${filtered.length}, nextPageCursor: ${data.nextPageCursor}`);
+            pageCount++;
+            console.log(`Page ${pageCount}: scanned ${members.length}, matched so far ${allFilteredUsers.length}`);
 
             nextCursor = data.nextPageCursor || '';
-            safetyCounter++;
-
-            // Stop once Roblox tells us there are no more pages,
-            // or as a safety net after 50 pages (5000 members scanned)
-        } while (nextCursor && safetyCounter < 50);
+        } while (nextCursor && !stoppedEarly && pageCount < 50);
 
         res.json({
             data: allFilteredUsers,
-            nextPageCursor: null, // we've already walked all pages
+            nextPageCursor: null,
             previousPageCursor: null,
             debug: {
-                pagesScanned: safetyCounter,
+                pagesScanned: pageCount,
                 totalUsersScanned: totalScanned,
                 matchedCount: allFilteredUsers.length,
+                stoppedEarlyOnMinRank: stoppedEarly,
                 allRankNamesSeen: Array.from(seenRankNames)
             }
         });
