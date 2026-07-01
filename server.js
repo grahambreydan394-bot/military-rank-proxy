@@ -45,6 +45,10 @@ async function refreshRoster() {
     cache.isRefreshing = true;
     console.log('Starting full roster scan...');
 
+    // Start fast, only slow down if Roblox actually rate limits us.
+    let delayMs = 50;
+    const MAX_DELAY = 5000;
+
     try {
         let allFilteredUsers = [];
         let nextCursor = '';
@@ -61,11 +65,14 @@ async function refreshRoster() {
                     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
                 });
                 data = response.data;
+                // Success -- ease delay back down toward the fast baseline
+                delayMs = Math.max(50, delayMs - 100);
             } catch (err) {
                 if (err.response?.status === 429) {
-                    // Rate limited -- back off and retry this same page
-                    console.log('Rate limited, waiting 2s before retry...');
-                    await new Promise(r => setTimeout(r, 2000));
+                    // Rate limited -- back off exponentially and retry this same page
+                    delayMs = Math.min(MAX_DELAY, delayMs * 2 + 500);
+                    console.log(`Rate limited, backing off to ${delayMs}ms and retrying...`);
+                    await new Promise(r => setTimeout(r, delayMs));
                     continue;
                 }
                 throw err;
@@ -82,13 +89,14 @@ async function refreshRoster() {
 
             pageCount++;
             if (pageCount % 20 === 0) {
-                console.log(`Scanned ${totalScanned} members so far, ${allFilteredUsers.length} matched...`);
+                console.log(`Scanned ${totalScanned} members so far, ${allFilteredUsers.length} matched... (delay: ${delayMs}ms)`);
             }
 
             nextCursor = data.nextPageCursor || '';
 
-            // Small delay to stay well under Roblox's rate limits
-            await new Promise(r => setTimeout(r, 300));
+            if (nextCursor) {
+                await new Promise(r => setTimeout(r, delayMs));
+            }
 
             // Hard safety cap: 1000 pages = 100,000 members
         } while (nextCursor && pageCount < 1000);
